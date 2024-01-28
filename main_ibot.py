@@ -10,6 +10,7 @@ import sys
 import datetime
 import time
 import math
+import itertools as it
 import json
 import numpy as np
 import utils
@@ -29,48 +30,49 @@ from models.head import iBOTHead
 from loader import ImageFolderMask
 from evaluation.unsupervised.unsup_cls import eval_pred
 
+
 def get_args_parser():
     parser = argparse.ArgumentParser('iBOT', add_help=False)
 
     # Model parameters
     parser.add_argument('--arch', default='vit_small', type=str,
-        choices=['vit_tiny', 'vit_small', 'vit_base', 'vit_large', 'deit_tiny', 'deit_small',
-                 'swin_tiny','swin_small', 'swin_base', 'swin_large'],
-        help="""Name of architecture to train. For quick experiments with ViTs,
+                        choices=['vit_tiny', 'vit_small', 'vit_base', 'vit_large', 'deit_tiny', 'deit_small',
+                                 'swin_tiny', 'swin_small', 'swin_base', 'swin_large'],
+                        help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
     parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
         of input square patches - default 16 (for 16x16 patches). Using smaller
         values leads to better performance but requires more memory. Applies only
         for ViTs (vit_tiny, vit_small and vit_base). If <16, we recommend disabling
-        mixed precision training (--use_fp16 false) to avoid unstabilities.""")
+        mixed precision training (--use_fp16 false) to avoid instabilities.""")
     parser.add_argument('--window_size', default=7, type=int, help="""Size of window - default 7.
-        This config is only valid for Swin Transofmer and is ignoired for vanilla ViT architectures.""")
+        This config is only valid for Swin Transformer and is ignored for vanilla ViT architectures.""")
     parser.add_argument('--out_dim', default=8192, type=int, help="""Dimensionality of
         output for [CLS] token.""")
     parser.add_argument('--patch_out_dim', default=8192, type=int, help="""Dimensionality of
         output for patch tokens.""")
-    parser.add_argument('--shared_head', default=False, type=utils.bool_flag, help="""Wether to share 
+    parser.add_argument('--shared_head', default=False, type=utils.bool_flag, help="""Whether to share 
         the same head for [CLS] token output and patch tokens output. When set to false, patch_out_dim
         is ignored and enforced to be same with out_dim. (Default: False)""")
     parser.add_argument('--shared_head_teacher', default=True, type=utils.bool_flag, help="""See above.
         Only works for teacher model. (Defeault: True)""")
     parser.add_argument('--norm_last_layer', default=True, type=utils.bool_flag,
-        help="""Whether or not to weight normalize the last layer of the head.
+                        help="""Whether or not to weight normalize the last layer of the head.
         Not normalizing leads to better performance but can make the training unstable.
         In our experiments, we typically set this paramater to False with vit_small and True with vit_base.""")
     parser.add_argument('--momentum_teacher', default=0.996, type=float, help="""Base EMA
         parameter for teacher update. The value is increased to 1 during training with cosine schedule.
         We recommend setting a higher value with small batches: for example use 0.9995 with batch size of 256.""")
     parser.add_argument('--norm_in_head', default=None,
-        help="Whether to use batch normalizations in projection head (Default: None)")
+                        help="Whether to use batch normalizations in projection head (Default: None)")
     parser.add_argument('--act_in_head', default='gelu',
-        help="Whether to use batch normalizations in projection head (Default: gelu)")
+                        help="Whether to use batch normalizations in projection head (Default: gelu)")
     parser.add_argument('--use_masked_im_modeling', default=True, type=utils.bool_flag,
-        help="Whether to use masked image modeling (mim) in backbone (Default: True)")
+                        help="Whether to use masked image modeling (mim) in backbone (Default: True)")
     parser.add_argument('--pred_ratio', default=0.3, type=float, nargs='+', help="""Ratio of partial prediction.
         If a list of ratio is specified, one of them will be randomly choosed for each patch.""")
     parser.add_argument('--pred_ratio_var', default=0, type=float, nargs='+', help="""Variance of partial prediction
-        ratio. Length should be indentical to the length of pred_ratio. 0 for disabling. """)
+        ratio. Length should be identical to the length of pred_ratio. 0 for disabling. """)
     parser.add_argument('--pred_shape', default='block', type=str, help="""Shape of partial prediction.""")
     parser.add_argument('--pred_start_epoch', default=0, type=int, help="""Start epoch to perform masked
         image prediction. We typically set this to 50 for swin transformer. (Default: 0)""")
@@ -78,10 +80,10 @@ def get_args_parser():
         loss over [CLS] tokens (Default: 1.0)""")
     parser.add_argument('--lambda2', default=1.0, type=float, help="""loss weight for beit 
         loss over masked patch tokens (Default: 1.0)""")
-        
+
     # Temperature teacher parameters
     parser.add_argument('--warmup_teacher_temp', default=0.04, type=float,
-        help="""Initial value for the teacher temperature: 0.04 works well in most cases.
+                        help="""Initial value for the teacher temperature: 0.04 works well in most cases.
         Try decreasing it if the training loss does not decrease.""")
     parser.add_argument('--teacher_temp', default=0.04, type=float, help="""Final value (after linear warmup)
         of the teacher temperature. For most experiments, anything above 0.07 is unstable. We recommend
@@ -91,7 +93,7 @@ def get_args_parser():
     parser.add_argument('--teacher_patch_temp', default=0.07, type=float, help=""""See 
         `--teacher_temp`""")
     parser.add_argument('--warmup_teacher_temp_epochs', default=30, type=int,
-        help='Number of warmup epochs for the teacher temperature (Default: 30).')
+                        help='Number of warmup epochs for the teacher temperature (Default: 30).')
 
     # Training/Optimization parameters
     parser.add_argument('--use_fp16', type=utils.bool_flag, default=True, help="""Whether or not
@@ -107,7 +109,7 @@ def get_args_parser():
         gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can
         help optimization for larger ViT architectures. 0 for disabling.""")
     parser.add_argument('--batch_size_per_gpu', default=128, type=int,
-        help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
+                        help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
     parser.add_argument('--epochs', default=100, type=int, help='Number of epochs of training.')
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
         during which we keep the output layer fixed. Typically doing so during
@@ -116,11 +118,12 @@ def get_args_parser():
         linear warmup (highest LR used during training). The learning rate is linearly scaled
         with the batch size, and specified here for a reference batch size of 256.""")
     parser.add_argument("--warmup_epochs", default=10, type=int,
-        help="Number of epochs for the linear learning-rate warm up.")
+                        help="Number of epochs for the linear learning-rate warm up.")
     parser.add_argument('--min_lr', type=float, default=1e-6, help="""Target LR at the
         end of optimization. We use a cosine LR schedule with linear warmup.""")
     parser.add_argument('--optimizer', default='adamw', type=str,
-        choices=['adamw', 'sgd', 'lars'], help="""Type of optimizer. We recommend using adamw with ViTs.""")
+                        choices=['adamw', 'sgd', 'lars'],
+                        help="""Type of optimizer. We recommend using adamw with ViTs.""")
     parser.add_argument('--load_from', default=None, help="""Path to load checkpoints to resume training.""")
     parser.add_argument('--drop_path', type=float, default=0.1, help="""Drop path rate for student network.""")
 
@@ -128,27 +131,34 @@ def get_args_parser():
     parser.add_argument('--global_crops_number', type=int, default=2, help="""Number of global
         views to generate. Default is to use two global crops. """)
     parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.14, 1.),
-        help="""Scale range of the cropped image before resizing, relatively to the origin image.
+                        help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
         recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
     parser.add_argument('--local_crops_number', type=int, default=0, help="""Number of small
         local views to generate. Set this parameter to 0 to disable multi-crop training.
         When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
     parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.05, 0.4),
-        help="""Scale range of the cropped image before resizing, relatively to the origin image.
+                        help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for small local view cropping of multi-crop.""")
+
+    # Hard view selection parameters
+    parser.add_argument('--use_hvs', type=utils.bool_flag, default=False, help="""Whether or not to use HVS""")
+    parser.add_argument('--hvs_limit', type=int, default=0, help="""Limit for HVS""")
+    parser.add_argument('--gcrops_num_loader', type=int, default=2)
+    parser.add_argument('--lcrops_num_loader', type=int, default=0)
 
     # Misc
     parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
-        help='Please specify path to the ImageNet training data.')
+                        help='Please specify path to the ImageNet training data.')
     parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
     parser.add_argument('--saveckp_freq', default=40, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
-    parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
+    parser.add_argument('--num_workers', default=8, type=int, help='Number of data loading workers per GPU.')
     parser.add_argument("--dist_url", default="env://", type=str, help="""url used to set up
         distributed training; see https://pytorch.org/docs/stable/distributed.html""")
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
     return parser
+
 
 def train_ibot(args):
     utils.init_distributed_mode(args)
@@ -157,21 +167,24 @@ def train_ibot(args):
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
     cudnn.benchmark = True
 
+    if args.use_hvs:
+        assert args.lcrops_num_loader >= args.local_crops_number
+        assert args.gcrops_num_loader > args.global_crops_number
     # ============ preparing data ... ============
     transform = DataAugmentationiBOT(
         args.global_crops_scale,
         args.local_crops_scale,
-        args.global_crops_number,
-        args.local_crops_number,
+        args.gcrops_num_loader,
+        args.lcrops_num_loader,
     )
     pred_size = args.patch_size * 8 if 'swin' in args.arch else args.patch_size
     dataset = ImageFolderMask(
-        args.data_path, 
+        args.data_path,
         transform=transform,
         patch_size=pred_size,
         pred_ratio=args.pred_ratio,
         pred_ratio_var=args.pred_ratio_var,
-        pred_aspect_ratio=(0.3, 1/0.3),
+        pred_aspect_ratio=(0.3, 1 / 0.3),
         pred_shape=args.pred_shape,
         pred_start_epoch=args.pred_start_epoch)
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
@@ -192,7 +205,7 @@ def train_ibot(args):
     if args.arch in models.__dict__.keys() and 'swin' in args.arch:
         student = models.__dict__[args.arch](
             window_size=args.window_size,
-            return_all_tokens=True, 
+            return_all_tokens=True,
             masked_im_modeling=args.use_masked_im_modeling,
         )
         teacher = models.__dict__[args.arch](
@@ -235,7 +248,7 @@ def train_ibot(args):
     teacher = utils.MultiCropWrapper(
         teacher,
         iBOTHead(
-            embed_dim, 
+            embed_dim,
             args.out_dim,
             patch_out_dim=args.patch_out_dim,
             norm=args.norm_in_head,
@@ -279,15 +292,16 @@ def train_ibot(args):
         args.teacher_patch_temp,
         args.warmup_teacher_temp_epochs,
         args.epochs,
+        args,
         lambda1=args.lambda1,
         lambda2=args.lambda2,
         mim_start_epoch=args.pred_start_epoch,
     ).cuda()
 
-    if utils.is_main_process(): # Tensorboard configuration
+    if utils.is_main_process():  # Tensorboard configuration
         local_runs = os.path.join(args.output_dir, 'tf_logs')
         writer = SummaryWriter(logdir=local_runs)
-        
+
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
     if args.optimizer == "adamw":
@@ -315,8 +329,8 @@ def train_ibot(args):
     )
     # momentum parameter is increased to 1. during training with a cosine schedule
     momentum_schedule = utils.cosine_scheduler(args.momentum_teacher, 1,
-                                            args.epochs, len(data_loader))
-                  
+                                               args.epochs, len(data_loader))
+
     print(f"Loss, optimizer and schedulers ready.")
 
     # ============ optionally resume training ... ============
@@ -341,8 +355,8 @@ def train_ibot(args):
 
         # ============ training one epoch of iBOT ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss,
-            data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
-            epoch, fp16_scaler, args)
+                                      data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
+                                      epoch, fp16_scaler, args)
 
         # ============ writing logs ... ============
         save_dict = {
@@ -365,18 +379,18 @@ def train_ibot(args):
                 f.write(json.dumps(log_stats) + "\n")
                 for k, v in train_stats.items():
                     writer.add_scalar(k, v, epoch)
-        
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
 
 
 def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loader,
-                    optimizer, lr_schedule, wd_schedule, momentum_schedule,epoch,
+                    optimizer, lr_schedule, wd_schedule, momentum_schedule, epoch,
                     fp16_scaler, args):
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = utils.MetricLogger(delimiter=" ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
-    
+
     # common params
     names_q, params_q, names_k, params_k = [], [], [], []
     for name_q, param_q in student.module.named_parameters():
@@ -390,7 +404,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loade
     params_k = [param_k for name_k, param_k in zip(names_k, params_k) if name_k in names_common]
 
     pred_labels, real_labels = [], []
-    for it, (images, labels, masks) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    for it, (images, labels, masks) in enumerate(metric_logger.log_every(data_loader, 100, header)):
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
@@ -400,16 +414,19 @@ def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loade
 
         # move images to gpu
         images = [im.cuda(non_blocking=True) for im in images]
-        masks = [msk.cuda(non_blocking=True) for msk in masks]        
-        
+        masks = [msk.cuda(non_blocking=True) for msk in masks]
+
+        images, masks = hard_view_selection(teacher, student, ibot_loss, images, masks, epoch, args)
+
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             # get global views
             teacher_output = teacher(images[:args.global_crops_number])
             student_output = student(images[:args.global_crops_number], mask=masks[:args.global_crops_number])
-            
+
             # get local views
             student.module.backbone.masked_im_modeling = False
-            student_local_cls = student(images[args.global_crops_number:])[0] if len(images) > args.global_crops_number else None
+            student_local_cls = student(images[args.global_crops_number:])[0] if len(
+                images) > args.global_crops_number else None
             student.module.backbone.masked_im_modeling = args.use_masked_im_modeling
 
             all_loss = ibot_loss(student_output, teacher_output, student_local_cls, masks, epoch)
@@ -422,7 +439,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loade
         # log statistics
         probs1 = teacher_output[0].chunk(args.global_crops_number)
         probs2 = student_output[0].chunk(args.global_crops_number)
-        pred1 = utils.concat_all_gather(probs1[0].max(dim=1)[1]) 
+        pred1 = utils.concat_all_gather(probs1[0].max(dim=1)[1])
         pred2 = utils.concat_all_gather(probs2[1].max(dim=1)[1])
         acc = (pred1 == pred2).sum() / pred1.size(0)
         pred_labels.append(pred1)
@@ -476,9 +493,9 @@ def train_one_epoch(student, teacher, teacher_without_ddp, ibot_loss, data_loade
 
 
 class iBOTLoss(nn.Module):
-    def __init__(self, out_dim, patch_out_dim, ngcrops, nlcrops, warmup_teacher_temp, 
-                 teacher_temp, warmup_teacher_temp2, teacher_temp2, 
-                 warmup_teacher_temp_epochs, nepochs, student_temp=0.1, 
+    def __init__(self, out_dim, patch_out_dim, ngcrops, nlcrops, warmup_teacher_temp,
+                 teacher_temp, warmup_teacher_temp2, teacher_temp2,
+                 warmup_teacher_temp_epochs, nepochs, args, student_temp=0.1,
                  center_momentum=0.9, center_momentum2=0.9,
                  lambda1=1.0, lambda2=1.0, mim_start_epoch=0):
         super().__init__()
@@ -511,13 +528,23 @@ class iBOTLoss(nn.Module):
             np.ones(nepochs - warmup_teacher_temp_epochs - mim_start_epoch) * teacher_temp2
         ))
 
+        self.ngcropsloader = args.gcrops_num_loader
+        self.lgcropsloader = args.gcrops_num_loader
+        self.limit = args.hvs_limit
+        global_combinations = it.product(range(0, args.gcrops_num_loader, 2),
+                                         range(1, args.gcrops_num_loader, 2))
+        local_combinations = list(
+            it.combinations(range(args.gcrops_num_loader, args.gcrops_num_loader + args.lcrops_num_loader), args.lcrops_num_loader))
+        all_combinations = it.product(global_combinations, local_combinations)
+        self.all_combinations = [g + l for g, l in all_combinations]
+
     def forward(self, student_output, teacher_output, student_local_cls, student_mask, epoch):
         """
         Cross-entropy between softmax outputs of the teacher and student networks.
         """
         student_cls, student_patch = student_output
         teacher_cls, teacher_patch = teacher_output
-        
+
         if student_local_cls is not None:
             student_cls = torch.cat([student_cls, student_local_cls])
 
@@ -526,7 +553,7 @@ class iBOTLoss(nn.Module):
         student_cls_c = student_cls.chunk(self.ncrops)
         student_patch = student_patch / self.student_temp
         student_patch_c = student_patch.chunk(self.ngcrops)
-        
+
         # teacher centering and sharpening
         temp = self.teacher_temp_schedule[epoch]
         temp2 = self.teacher_temp2_schedule[epoch]
@@ -549,12 +576,82 @@ class iBOTLoss(nn.Module):
                     loss1 = torch.sum(-teacher_cls_c[q] * F.log_softmax(student_cls_c[v], dim=-1), dim=-1)
                     total_loss1 += loss1.mean()
                     n_loss_terms1 += 1
-            
+
         total_loss1 = total_loss1 / n_loss_terms1 * self.lambda1
         total_loss2 = total_loss2 / n_loss_terms2 * self.lambda2
         total_loss = dict(cls=total_loss1, patch=total_loss2, loss=total_loss1 + total_loss2)
-        self.update_center(teacher_cls, teacher_patch)                  
+        self.update_center(teacher_cls, teacher_patch)
         return total_loss
+
+    def hvs(self, student_output, teacher_output, student_local_cls, student_mask, epoch):
+        """
+        Cross-entropy between softmax outputs of the teacher and student networks.
+        """
+        bs = len(student_mask[0])
+        device = student_mask[0].device
+        ncrops = len(student_mask)
+
+        student_cls, student_patch = student_output
+        teacher_cls, teacher_patch = teacher_output
+
+        if student_local_cls is not None:
+            student_cls = torch.cat([student_cls, student_local_cls])
+
+        # [CLS] and patch for global patches
+        student_cls = student_cls / self.student_temp
+        student_cls_c = student_cls.chunk(ncrops)
+        student_patch = student_patch / self.student_temp
+        student_patch_c = student_patch.chunk(self.ngcropsloader)
+
+        # teacher centering and sharpening
+        temp = self.teacher_temp_schedule[epoch]
+        temp2 = self.teacher_temp2_schedule[epoch]
+        teacher_cls_c = F.softmax((teacher_cls - self.center) / temp, dim=-1)
+        teacher_cls_c = teacher_cls_c.detach().chunk(self.ngcropsloader)
+        teacher_patch_c = F.softmax((teacher_patch - self.center2) / temp2, dim=-1)
+        teacher_patch_c = teacher_patch_c.detach().chunk(self.ngcropsloader)
+
+        if self.limit:
+            combinations = [self.all_combinations[i] for i in torch.randperm(len(self.all_combinations))[:self.limit]]
+        else:
+            combinations = self.all_combinations
+
+        score = torch.zeros(bs, device=device)
+        selected = torch.zeros((2 + self.nlcrops, bs), dtype=torch.uint8, device=device)
+        for idx in combinations:
+            _teacher_cls_c = [teacher_cls_c[x] for x in idx[:2]]
+            _teacher_patch_c = [teacher_patch_c[x] for x in idx[:2]]
+            _student_patch_c = [student_patch_c[x] for x in idx[:2]]
+            _student_mask = [student_mask[x] for x in idx[:2]]
+            _student_cls_c = [student_cls_c[x] for x in idx]
+
+            total_loss1, n_loss_terms1 = 0, 0
+            total_loss2, n_loss_terms2 = 0, 0
+            for q in range(len(_teacher_cls_c)):
+                for v in range(len(_student_cls_c)):
+                    if v == q:
+                        loss2 = torch.sum(-_teacher_patch_c[q] * F.log_softmax(_student_patch_c[v], dim=-1), dim=-1)
+                        mask = _student_mask[v].flatten(-2, -1)
+                        loss2 = torch.sum(loss2 * mask.float(), dim=-1) / mask.sum(dim=-1).clamp(min=1.0)
+                        total_loss2 += loss2
+                        n_loss_terms2 += 1
+                    else:
+                        loss1 = torch.sum(-_teacher_cls_c[q] * F.log_softmax(_student_cls_c[v], dim=-1), dim=-1)
+                        total_loss1 += loss1
+                        n_loss_terms1 += 1
+
+            total_loss1 = total_loss1 / n_loss_terms1 * self.lambda1
+            total_loss2 = total_loss2 / n_loss_terms2 * self.lambda2
+            # total_loss = dict(cls=total_loss1, patch=total_loss2, loss=total_loss1 + total_loss2)
+            total_loss = total_loss1 + total_loss2
+
+            score, indices = torch.stack((score, total_loss)).max(dim=0)
+            indices = indices.type(torch.bool)
+
+            for n, ids in enumerate(idx):
+                selected[n][indices] = ids
+        # self.update_center(teacher_cls, teacher_patch)
+        return score, selected
 
     @torch.no_grad()
     def update_center(self, teacher_cls, teacher_patch):
@@ -570,6 +667,7 @@ class iBOTLoss(nn.Module):
         dist.all_reduce(patch_center)
         patch_center = patch_center / (len(teacher_patch) * dist.get_world_size())
         self.center2 = self.center2 * self.center_momentum2 + patch_center * (1 - self.center_momentum2)
+
 
 class DataAugmentationiBOT(object):
     def __init__(self, global_crops_scale, local_crops_scale, global_crops_number, local_crops_number):
@@ -619,6 +717,45 @@ class DataAugmentationiBOT(object):
         for _ in range(self.local_crops_number):
             crops.append(self.local_transfo(image))
         return crops
+
+
+@torch.no_grad()
+def hard_view_selection(teacher, student, ibot_loss, images, masks, epoch, args):
+    if args.use_hvs:
+        # images_tmp = [nn.functional.interpolate(img, scale_factor=0.5) for img in images]
+        # size = images_tmp[0].size(-1) // 16
+        # masks_tmp = [nn.functional.interpolate(mask.unsqueeze(1).float(), size, mode='bilinear').squeeze() for mask in masks]
+        # masks_tmp = [mask > 0.5 for mask in masks_tmp]
+        images_tmp = images
+        masks_tmp = masks
+
+        with torch.cuda.amp.autocast():
+            teacher_output = teacher(images_tmp[:args.gcrops_num_loader])
+            student_output = student(images_tmp[:args.gcrops_num_loader],
+                                     mask=masks_tmp[:args.gcrops_num_loader])
+
+            # get local views
+            student.module.backbone.masked_im_modeling = False
+            student_local_cls = student(images_tmp[args.gcrops_num_loader:])[0] if len(
+                images) > args.gcrops_num_loader else None
+            student.module.backbone.masked_im_modeling = args.use_masked_im_modeling
+
+            loss, selected = ibot_loss.hvs(student_output, teacher_output, student_local_cls, masks_tmp, epoch)
+
+        out_images = [torch.empty_like(images[0]) for _ in range(2)] + \
+                     [torch.empty_like(images[-1]) for _ in range(args.local_crops_number)]
+        out_masks = [torch.empty_like(masks[0]) for _ in range(2)]
+        for n in range(2):
+            for m in range(args.gcrops_num_loader):
+                out_images[n] = torch.where((selected[n] == m)[:, None, None, None], images[m], out_images[n])
+                out_masks[n] = torch.where((selected[n] == m)[:, None, None], masks[m], out_masks[n])
+        for n in range(2, len(out_images)):
+            for m in range(args.gcrops_num_loader, len(images)):
+                out_images[n] = torch.where((selected[n] == m)[:, None, None, None], images[m], out_images[n])
+
+        return out_images, out_masks
+
+    return images, masks
 
 
 if __name__ == '__main__':

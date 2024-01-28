@@ -18,6 +18,7 @@ from functools import partial
 from utils import trunc_normal_
 from timm.models.registry import register_model
 
+
 def drop_path(x, drop_prob: float = 0., training: bool = False):
     if drop_prob == 0. or not training:
         return x
@@ -32,6 +33,7 @@ def drop_path(x, drop_prob: float = 0., training: bool = False):
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
     """
+
     def __init__(self, drop_prob=None):
         super(DropPath, self).__init__()
         self.drop_prob = drop_prob
@@ -85,8 +87,9 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x, attn
 
+
 class Block(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., 
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0.,
                  attn_drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, init_values=0):
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -115,9 +118,11 @@ class Block(nn.Module):
             x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
         return x
 
+
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
     """
+
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
         num_patches = (img_size // patch_size) * (img_size // patch_size)
@@ -126,16 +131,18 @@ class PatchEmbed(nn.Module):
         self.num_patches = num_patches
 
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-            
+
     def forward(self, x):
         B, C, H, W = x.shape
         return self.proj(x)
 
+
 class VisionTransformer(nn.Module):
     """ Vision Transformer """
+
     def __init__(self, img_size=[224], patch_size=16, in_chans=3, num_classes=0, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
-                 drop_path_rate=0., norm_layer=partial(nn.LayerNorm, eps=1e-6), return_all_tokens=False, 
+                 drop_path_rate=0., norm_layer=partial(nn.LayerNorm, eps=1e-6), return_all_tokens=False,
                  init_values=0, use_mean_pooling=False, masked_im_modeling=False):
         super().__init__()
         self.num_features = self.embed_dim = embed_dim
@@ -153,7 +160,7 @@ class VisionTransformer(nn.Module):
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, 
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
                 init_values=init_values)
             for i in range(depth)])
 
@@ -235,7 +242,7 @@ class VisionTransformer(nn.Module):
         x = self.norm(x)
         if self.fc_norm is not None:
             x[:, 0] = self.fc_norm(x[:, 1:, :].mean(1))
-        
+
         return_all_tokens = self.return_all_tokens if \
             return_all_tokens is None else return_all_tokens
         if return_all_tokens:
@@ -260,7 +267,7 @@ class VisionTransformer(nn.Module):
             if len(self.blocks) - i <= n:
                 output.append(self.norm(x))
         return output
-        
+
     def get_num_layers(self):
         return len(self.blocks)
 
@@ -268,11 +275,13 @@ class VisionTransformer(nn.Module):
         x.permute(0, 2, 3, 1)[mask, :] = self.masked_embed.to(x.dtype)
         return x
 
+
 def vit_tiny(patch_size=16, **kwargs):
     model = VisionTransformer(
         patch_size=patch_size, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4,
         qkv_bias=True, **kwargs)
     return model
+
 
 def vit_small(patch_size=16, **kwargs):
     model = VisionTransformer(
@@ -280,11 +289,13 @@ def vit_small(patch_size=16, **kwargs):
         qkv_bias=True, **kwargs)
     return model
 
+
 def vit_base(patch_size=16, **kwargs):
     model = VisionTransformer(
         patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
         qkv_bias=True, **kwargs)
     return model
+
 
 def vit_large(patch_size=16, **kwargs):
     model = VisionTransformer(
