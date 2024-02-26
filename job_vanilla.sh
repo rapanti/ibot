@@ -26,11 +26,10 @@ torchrun \
   --shared_head true \
   --pred_ratio 0 0.3 \
   --pred_ratio_var 0 0.2 \
-  --use_hvp true \
-  --hvp_step 3 \
+  --use_hvp false \
   --local_crops_number 2 \
-  --global_crops_number_loader 4 \
-  --local_crops_number_loader 4 \
+  --global_crops_number_loader 2 \
+  --local_crops_number_loader 2 \
   --epochs 100 \
   --seed 0
 
