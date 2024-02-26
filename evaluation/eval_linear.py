@@ -149,7 +149,7 @@ def eval_linear(args):
             log_stats = {**{k: v for k, v in log_stats.items()},
                          **{f'test_{k}': v for k, v in test_stats.items()}}
         
-            if utils.is_main_process() and (test_stats["acc1"] >= best_acc):
+            if utils.is_main_process() and ((test_stats["acc1"] >= best_acc) or epoch == args.epochs - 1):
                 # always only save best checkpoint till now
                 with (Path(args.output_dir) / "log.txt").open("a") as f:
                     f.write(json.dumps(log_stats) + "\n")
