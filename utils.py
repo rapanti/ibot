@@ -385,9 +385,10 @@ def reduce_dict(input_dict, average=True):
 
 
 class MetricLogger(object):
-    def __init__(self, delimiter="\t"):
+    def __init__(self, steps_per_epoch, delimiter="\t"):
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
+        self.steps_per_epoch = steps_per_epoch
 
     def update(self, **kwargs):
         for k, v in kwargs.items():
@@ -426,7 +427,7 @@ class MetricLogger(object):
         end = time.time()
         iter_time = SmoothedValue(fmt="{avg:.6f}")
         data_time = SmoothedValue(fmt="{avg:.6f}")
-        space_fmt = ":" + str(len(str(len(iterable)))) + "d"
+        space_fmt = ":" + str(len(str(self.steps_per_epoch))) + "d"
         if torch.cuda.is_available():
             log_msg = self.delimiter.join(
                 [
@@ -455,14 +456,15 @@ class MetricLogger(object):
             data_time.update(time.time() - end)
             yield obj
             iter_time.update(time.time() - end)
-            if i % print_freq == 0 or i == len(iterable) - 1:
-                eta_seconds = iter_time.global_avg * (len(iterable) - i)
+            if i % print_freq == 0 or i == self.steps_per_epoch - 1:
+                eta_seconds = iter_time.global_avg * (self.steps_per_epoch - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
                 if torch.cuda.is_available():
                     print(
                         log_msg.format(
                             i,
-                            len(iterable),
+                            self.steps_per_epoch,
+                            # len(iterable),
                             eta=eta_string,
                             meters=str(self),
                             time=str(iter_time),
@@ -474,7 +476,8 @@ class MetricLogger(object):
                     print(
                         log_msg.format(
                             i,
-                            len(iterable),
+                            # len(iterable),
+                            self.steps_per_epoch,
                             eta=eta_string,
                             meters=str(self),
                             time=str(iter_time),
@@ -487,7 +490,7 @@ class MetricLogger(object):
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print(
             "{} Total time: {} ({:.6f} s / it)".format(
-                header, total_time_str, total_time / len(iterable)
+                header, total_time_str, total_time / self.steps_per_epoch
             )
         )
 

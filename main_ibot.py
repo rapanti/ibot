@@ -15,21 +15,25 @@ import sys
 import time
 from pathlib import Path
 
+import models
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import models as torchvision_models
-from torchvision import transforms
-from torchvision.transforms import InterpolationMode
-
-import models
 import utils
 from evaluation.unsupervised.unsup_cls import eval_pred
 from loader import ImageFolderMask
 from models.head import iBOTHead
+from torch.utils.data import DataLoader, DistributedSampler
+from torchvision import models as torchvision_models
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
+import webdataset as wds
+import wids
+
+from torchvision.utils import save_image
 
 
 def get_args_parser():
@@ -372,9 +376,29 @@ def train_ibot(args):
         args.global_crops_number_loader,
         args.local_crops_number_loader,
     )
+
     pred_size = args.patch_size * 8 if "swin" in args.arch else args.patch_size
-    dataset = ImageFolderMask(
-        args.data_path,
+    # dataset = ImageFolderMask(
+    #     args.data_path,
+    #     transform=transform,
+    # patch_size=pred_size,
+    # pred_ratio=args.pred_ratio,
+    # pred_ratio_var=args.pred_ratio_var,
+    # pred_aspect_ratio=(0.3, 1 / 0.3),
+    # pred_shape=args.pred_shape,
+    # pred_start_epoch=args.pred_start_epoch,
+    # )
+    # sampler = DistributedSampler(dataset, shuffle=True)  # type: ignore
+    # data_loader = DataLoader(  # type: ignore
+    #     dataset,
+    #     sampler=sampler,
+    #     batch_size=args.batch_size_per_gpu,
+    #     num_workers=args.num_workers,
+    #     pin_memory=True,
+    #     drop_last=True,
+    # )
+
+    make_sample = SampleMaker(
         transform=transform,
         patch_size=pred_size,
         pred_ratio=args.pred_ratio,
@@ -383,16 +407,55 @@ def train_ibot(args):
         pred_shape=args.pred_shape,
         pred_start_epoch=args.pred_start_epoch,
     )
-    sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)  # type: ignore
-    data_loader = torch.utils.data.DataLoader(  # type: ignore
-        dataset,
-        sampler=sampler,
+
+    # training_urls = "/work/dlclarge2/rapanti-hvs/imagenet-wds/{00000..00009}.tar"
+    bucket = "/work/dlclarge2/rapanti-hvs/imagenet-wds/train/"
+    cache_dir = "/tmp"
+
+    # trainset = ShardListDatasetMask(
+    #     bucket+"imagenet-train.json", cache_dir=cache_dir, keep=True,
+    #     transformations=transform,
+    #     patch_size=pred_size,
+    #     pred_ratio=args.pred_ratio,
+    #     pred_ratio_var=args.pred_ratio_var,
+    #     pred_aspect_ratio=(0.3, 1 / 0.3),
+    #     pred_shape=args.pred_shape,
+    #     pred_start_epoch=args.pred_start_epoch,
+    # )
+    trainset = wids.ShardListDataset(
+        bucket + "imagenet-train.json",
+        cache_dir=cache_dir,
+        keep=True,
+    )
+    trainset.add_transform(make_sample)
+
+    trainsampler = wids.DistributedChunkedSampler(
+        trainset, chunksize=1000, shuffle=True, shufflefirst=True, seed=args.seed
+    )
+
+    data_loader = DataLoader(
+        trainset,
         batch_size=args.batch_size_per_gpu,
         num_workers=args.num_workers,
+        sampler=trainsampler,
         pin_memory=True,
         drop_last=True,
     )
-    print(f"Data loaded: there are {len(dataset)} images.")
+
+    # trainset = wds.WebDataset(
+    #     training_urls, resampled=True, cache_dir=cache_dir, shardshuffle=True
+    # )
+    # trainset = trainset.shuffle(1000).decode("pil").map(make_sample)
+    # trainset = trainset.batched(args.batch_size_per_gpu)
+
+    # trainloader = wds.WebLoader(trainset, batch_size=None, num_workers=args.num_workers, pin_memory=True)
+    # trainloader = trainloader.unbatched().shuffle(1000).batched(args.batch_size_per_gpu)
+
+    steps_per_epoch = len(trainset) // (args.batch_size_per_gpu * args.world_size)
+    args.steps_per_epoch = steps_per_epoch
+    # data_loader = trainloader.with_epoch(steps_per_epoch)
+
+    print(f"Data loaded: there are {len(trainset)} images.")
 
     # ============ building student and teacher networks ... ============
     # we changed the name DeiT-S for ViT-S to avoid confusions
@@ -523,17 +586,17 @@ def train_ibot(args):
         args.lr * (args.batch_size_per_gpu * utils.get_world_size()) / 256.0,  # linear scaling rule
         args.min_lr,
         args.epochs,
-        len(data_loader),
+        steps_per_epoch,
         warmup_epochs=args.warmup_epochs,
     )
     wd_schedule = utils.cosine_scheduler(
         args.weight_decay,
         args.weight_decay_end,
         args.epochs,
-        len(data_loader),
+        steps_per_epoch,
     )
     # momentum parameter is increased to 1. during training with a cosine schedule
-    momentum_schedule = utils.cosine_scheduler(args.momentum_teacher, 1, args.epochs, len(data_loader))
+    momentum_schedule = utils.cosine_scheduler(args.momentum_teacher, 1, args.epochs, steps_per_epoch)
 
     print("Loss, optimizer and schedulers ready.")
 
@@ -554,9 +617,9 @@ def train_ibot(args):
     start_time = time.time()
     print("Starting iBOT training!")
     for epoch in range(start_epoch, args.epochs):
-        data_loader.sampler.set_epoch(epoch)
-        data_loader.dataset.set_epoch(epoch)
-
+        # data_loader.sampler.set_epoch(epoch)
+        # data_loader.dataset.set_epoch(epoch)
+        trainsampler.set_epoch(0)
         # ============ training one epoch of iBOT ... ============
         train_stats = train_one_epoch(
             student,
@@ -611,7 +674,7 @@ def train_one_epoch(
     fp16_scaler,
     args,
 ):
-    metric_logger = utils.MetricLogger(delimiter=" ")
+    metric_logger = utils.MetricLogger(steps_per_epoch=args.steps_per_epoch, delimiter=" ")
     header = "Epoch: [{}/{}]".format(epoch, args.epochs)
 
     # common params
@@ -626,9 +689,14 @@ def train_one_epoch(
     params_q = [param_q for name_q, param_q in zip(names_q, params_q) if name_q in names_common]
     params_k = [param_k for name_k, param_k in zip(names_k, params_k) if name_k in names_common]
 
-    pred_labels, real_labels = [], []
-    for it, (images, labels, masks) in enumerate(metric_logger.log_every(data_loader, 10, header)):
-        it = len(data_loader) * epoch + it  # global training iteration
+    # for it, (images, masks, index) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    for it, (images, masks) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+        it = args.steps_per_epoch * epoch + it  # global training iteration
+
+        save_image(images[0], "batch.png")
+        print(masks[0].shape, masks[0].dtype, masks[0].min(), masks[0].max())
+        save_image(masks[0].unsqueeze(1).float(), "mask.png")
+        sys.exit()
 
         # update weight decay and learning rate according to their schedule
         for i, param_group in enumerate(optimizer.param_groups):
@@ -639,6 +707,14 @@ def train_one_epoch(
         # move images to gpu
         images = [im.cuda(non_blocking=True) for im in images]
         masks = [msk.cuda(non_blocking=True) for msk in masks]
+        # index = index.cuda(non_blocking=True)
+
+        # tensor_list = [torch.zeros_like(index) for _ in range(2)]
+        # dist.all_gather(tensor_list, index)
+        # tensor_list = [t.cpu().detach().numpy() for t in tensor_list]
+        # if np.intersect1d(tensor_list[0], tensor_list[1]):
+        #     print("Error: intersection found")
+        #     sys.exit()
 
         if args.use_hvp:
             if not it % args.hvp_step:
@@ -652,8 +728,8 @@ def train_one_epoch(
 
         with torch.cuda.amp.autocast(fp16_scaler is not None):  # type: ignore
             # get global views
-            teacher_output = teacher(images[:args.global_crops_number])
-            student_output = student(images[:args.global_crops_number], mask=masks[:args.global_crops_number])
+            teacher_output = teacher(images[: args.global_crops_number])
+            student_output = student(images[: args.global_crops_number], mask=masks[: args.global_crops_number])
 
             # get local views
             student_local_cls = None
@@ -669,14 +745,14 @@ def train_one_epoch(
             print("Loss is {}, stopping training".format(loss.item()), force=True)  # type: ignore
             sys.exit(1)
 
-        # log statistics
-        probs1 = teacher_output[0].chunk(args.global_crops_number)
-        probs2 = student_output[0].chunk(args.global_crops_number)
-        pred1 = utils.concat_all_gather(probs1[0].max(dim=1)[1])
-        pred2 = utils.concat_all_gather(probs2[1].max(dim=1)[1])
-        acc = (pred1 == pred2).sum() / pred1.size(0)
-        pred_labels.append(pred1)
-        real_labels.append(utils.concat_all_gather(labels.to(pred1.device)))
+        # # log statistics
+        # probs1 = teacher_output[0].chunk(args.global_crops_number)
+        # probs2 = student_output[0].chunk(args.global_crops_number)
+        # pred1 = utils.concat_all_gather(probs1[0].max(dim=1)[1])
+        # pred2 = utils.concat_all_gather(probs2[1].max(dim=1)[1])
+        # acc = (pred1 == pred2).sum() / pred1.size(0)
+        # pred_labels.append(pred1)
+        # real_labels.append(utils.concat_all_gather(labels.to(pred1.device)))
 
         # student update
         optimizer.zero_grad()
@@ -706,19 +782,19 @@ def train_one_epoch(
         metric_logger.update(loss=loss.item())
         for key, value in all_loss.items():
             metric_logger.update(**{key: value.item()})
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-        metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
-        metric_logger.update(acc=acc)
+        # metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        # metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
+        # metric_logger.update(acc=acc)
 
-    pred_labels = torch.cat(pred_labels).cpu().detach().numpy()
-    real_labels = torch.cat(real_labels).cpu().detach().numpy()
-    nmi, ari, fscore, adjacc = eval_pred(real_labels, pred_labels, calc_acc=False)
+    # pred_labels = torch.cat(pred_labels).cpu().detach().numpy()
+    # real_labels = torch.cat(real_labels).cpu().detach().numpy()
+    # nmi, ari, fscore, adjacc = eval_pred(real_labels, pred_labels, calc_acc=False)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print("NMI: {}, ARI: {}, F: {}, ACC: {}".format(nmi, ari, fscore, adjacc))
+    # print("NMI: {}, ARI: {}, F: {}, ACC: {}".format(nmi, ari, fscore, adjacc))
     print("Averaged stats:", metric_logger)
     return_dict = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-    return_dict.update({"nmi": nmi, "ari": ari, "fscore": fscore, "adjacc": adjacc})
+    # return_dict.update({"nmi": nmi, "ari": ari, "fscore": fscore, "adjacc": adjacc})
     return return_dict
 
 
@@ -1004,25 +1080,26 @@ class DataAugmentationiBOT(object):
 @torch.no_grad()
 def hard_view_selection(images, masks, student, teacher, criterion, epoch, args):
     with torch.cuda.amp.autocast():  # type: ignore
-        teacher_output = teacher(images[:args.global_crops_number_loader])
+        teacher_output = teacher(images[: args.global_crops_number_loader])
         student_output = student(
-            images[:args.global_crops_number_loader], mask=masks[:args.global_crops_number_loader]
+            images[: args.global_crops_number_loader], mask=masks[: args.global_crops_number_loader]
         )
 
         student_local_cls = None
         if len(images) > args.global_crops_number_loader:
             student.module.backbone.masked_im_modeling = False
-            student_local_cls = student(images[args.global_crops_number_loader:])[0]
+            student_local_cls = student(images[args.global_crops_number_loader :])[0]
             student.module.backbone.masked_im_modeling = args.use_masked_im_modeling
 
         selection = criterion.hv_forward(student_output, teacher_output, student_local_cls, masks, epoch)
 
-    out_images = [torch.empty_like(images[0]) for _ in range(2)] +\
-                 [torch.empty_like(images[-1]) for _ in range(args.local_crops_number)]
+    out_images = [torch.empty_like(images[0]) for _ in range(2)] + [
+        torch.empty_like(images[-1]) for _ in range(args.local_crops_number)
+    ]
     out_masks = [torch.empty_like(masks[0]) for _ in range(2)]
-    
+
     # copy the selected images and masks
-    # for global crops 
+    # for global crops
     for n in range(args.global_crops_number):
         for m in range(args.global_crops_number_loader):
             out_images[n] = torch.where((selection[n] == m)[:, None, None, None], images[m], out_images[n])
@@ -1038,6 +1115,125 @@ def hard_view_selection(images, masks, student, teacher, criterion, epoch, args)
     #         assert torch.equal(out_images[n][m], images[idx][m])
 
     return out_images, out_masks
+
+
+class SampleMaker(object):
+    def __init__(
+        self,
+        *args,
+        transform,
+        patch_size,
+        pred_ratio,
+        pred_ratio_var,
+        pred_aspect_ratio,
+        pred_shape="block",
+        pred_start_epoch=0,
+        **kwargs,
+    ):
+        super(SampleMaker, self).__init__(*args, **kwargs)
+        self.transform = transform
+        self.psz = patch_size
+        self.pred_ratio = pred_ratio[0] if isinstance(pred_ratio, list) and len(pred_ratio) == 1 else pred_ratio
+        self.pred_ratio_var = (
+            pred_ratio_var[0] if isinstance(pred_ratio_var, list) and len(pred_ratio_var) == 1 else pred_ratio_var
+        )
+        if isinstance(self.pred_ratio, list) and not isinstance(self.pred_ratio_var, list):
+            self.pred_ratio_var = [self.pred_ratio_var] * len(self.pred_ratio)
+        self.log_aspect_ratio = tuple(map(lambda x: math.log(x), pred_aspect_ratio))
+        self.pred_shape = pred_shape
+        self.pred_start_epoch = pred_start_epoch
+
+    def get_pred_ratio(self):
+        if hasattr(self, "epoch") and self.epoch < self.pred_start_epoch:
+            return 0
+
+        if isinstance(self.pred_ratio, list):
+            pred_ratio = []
+            for prm, prv in zip(self.pred_ratio, self.pred_ratio_var):
+                assert prm >= prv
+                pr = random.uniform(prm - prv, prm + prv) if prv > 0 else prm
+                pred_ratio.append(pr)
+            pred_ratio = random.choice(pred_ratio)
+        else:
+            assert self.pred_ratio >= self.pred_ratio_var
+            pred_ratio = (
+                random.uniform(self.pred_ratio - self.pred_ratio_var, self.pred_ratio + self.pred_ratio_var)
+                if self.pred_ratio_var > 0
+                else self.pred_ratio
+            )
+
+        return pred_ratio
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __call__(self, sample, val=False):
+        output = self.transform(sample[".jpg"])
+        # print(sample['__index__'])
+        # index = sample['__index__']
+
+        masks = []
+        for img in output:
+            try:
+                H, W = img.shape[1] // self.psz, img.shape[2] // self.psz
+            except:
+                # skip non-image
+                continue
+
+            high = self.get_pred_ratio() * H * W
+
+            if self.pred_shape == "block":
+                # following BEiT (https://arxiv.org/abs/2106.08254), see at
+                # https://github.com/microsoft/unilm/blob/b94ec76c36f02fb2b0bf0dcb0b8554a2185173cd/beit/masking_generator.py#L55
+                mask = np.zeros((H, W), dtype=bool)
+                mask_count = 0
+                while mask_count < high:
+                    max_mask_patches = high - mask_count
+
+                    delta = 0
+                    for attempt in range(10):
+                        low = (min(H, W) // 3) ** 2
+                        target_area = random.uniform(low, max_mask_patches)
+                        aspect_ratio = math.exp(random.uniform(*self.log_aspect_ratio))
+                        h = int(round(math.sqrt(target_area * aspect_ratio)))
+                        w = int(round(math.sqrt(target_area / aspect_ratio)))
+                        if w < W and h < H:
+                            top = random.randint(0, H - h)
+                            left = random.randint(0, W - w)
+
+                            num_masked = mask[top : top + h, left : left + w].sum()
+                            if 0 < h * w - num_masked <= max_mask_patches:
+                                for i in range(top, top + h):
+                                    for j in range(left, left + w):
+                                        if mask[i, j] == 0:
+                                            mask[i, j] = 1
+                                            delta += 1
+
+                        if delta > 0:
+                            break
+
+                    if delta == 0:
+                        break
+                    else:
+                        mask_count += delta
+
+            elif self.pred_shape == "rand":
+                mask = np.hstack(
+                    [
+                        np.zeros(H * W - int(high)),
+                        np.ones(int(high)),
+                    ]
+                ).astype(bool)
+                np.random.shuffle(mask)
+                mask = mask.reshape(H, W)
+
+            else:
+                # no implementation
+                assert False
+
+            masks.append(mask)
+
+        return output, masks
 
 
 if __name__ == "__main__":
