@@ -384,7 +384,7 @@ def train_ibot(args):
     )
     trainset = wids.ShardListDataset(
         os.path.join(args.data_path, 'train', "imagenet_train.json"),
-        cache_dir="/tmp",
+        cache_dir="/tmp/train",
         keep=True,
     )
     trainset.add_transform(make_sample)
