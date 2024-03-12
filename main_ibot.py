@@ -383,7 +383,7 @@ def train_ibot(args):
         pred_start_epoch=args.pred_start_epoch,
     )
     trainset = wids.ShardListDataset(
-        args.data_path + "imagenet_train.json",
+        os.path.join(args.data_path, 'train', "imagenet_train.json"),
         cache_dir="/tmp",
         keep=True,
     )
