@@ -637,8 +637,8 @@ def train_one_epoch(
     params_q = [param_q for name_q, param_q in zip(names_q, params_q) if name_q in names_common]
     params_k = [param_k for name_k, param_k in zip(names_k, params_k) if name_k in names_common]
 
-    for it, (images, masks, index) in enumerate(metric_logger.log_every(data_loader, 10, header)):
-        # for it, (images, masks) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    # for it, (images, masks, index) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    for it, (images, masks) in enumerate(metric_logger.log_every(data_loader, 100, header)):
         it = args.steps_per_epoch * epoch + it  # global training iteration
 
         # update weight decay and learning rate according to their schedule
@@ -651,13 +651,13 @@ def train_one_epoch(
         images = [im.cuda(non_blocking=True) for im in images]
         masks = [msk.cuda(non_blocking=True) for msk in masks]
 
-        index = index.cuda(non_blocking=True)
-        tensor_list = [torch.zeros_like(index) for _ in range(args.world_size)]
-        dist.all_gather(tensor_list, index)
-        tensor_list = [t.cpu().detach().numpy() for t in tensor_list]
-        if np.concatenate(tensor_list).size != np.unique(np.concatenate(tensor_list)).size:
-            print("Error: intersection found")
-            sys.exit()
+        # index = index.cuda(non_blocking=True)
+        # tensor_list = [torch.zeros_like(index) for _ in range(args.world_size)]
+        # dist.all_gather(tensor_list, index)
+        # tensor_list = [t.cpu().detach().numpy() for t in tensor_list]
+        # if np.concatenate(tensor_list).size != np.unique(np.concatenate(tensor_list)).size:
+        #     print("Error: intersection found")
+        #     sys.exit()
 
         if args.use_hvp:
             if not it % args.hvp_step:
@@ -1095,7 +1095,7 @@ class SampleMaker(object):
     def __call__(self, sample, val=False):
         output = self.transform(sample[".jpg"])
         # print(sample['__index__'])
-        index = sample["__index__"]
+        # index = sample["__index__"]
 
         masks = []
         for img in output:
@@ -1158,8 +1158,8 @@ class SampleMaker(object):
 
             masks.append(mask)
 
-        # return output, masks
-        return output, masks, index
+        # return output, masks, index
+        return output, masks
 
 
 if __name__ == "__main__":

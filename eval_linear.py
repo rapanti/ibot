@@ -14,7 +14,7 @@ import copy
 import json
 import os
 from pathlib import Path
-
+import math
 import models
 import torch
 import torch.backends.cudnn as cudnn
@@ -110,7 +110,7 @@ def eval_linear(args):
     )
     print(f"Data loaded with {len(dataset_train)} train and {len(dataset_val)} val imgs.")
     args.steps_per_train_epoch = len(dataset_train) // (args.batch_size_per_gpu * utils.get_world_size())
-    args.steps_per_val_epoch = len(dataset_val) // (args.batch_size_per_gpu * 4 * utils.get_world_size())
+    args.steps_per_val_epoch = math.ceil(len(dataset_val) / args.batch_size_per_gpu * 4)
     # ============ building network ... ============
     if "swin" in args.arch:
         args.patch_size = 4
@@ -164,7 +164,6 @@ def eval_linear(args):
     best_acc = to_restore["best_acc"]
 
     for epoch in range(start_epoch, args.epochs):
-        train_loader.sampler.set_epoch(epoch)
         sampler.set_epoch(epoch)
         model.eval()
         linear_classifier.train()
@@ -259,7 +258,6 @@ def train(model, linear_classifier, optimizer, loader, epoch, n, avgpool, args):
         torch.cuda.synchronize()
         metric_logger.update(loss=loss.item())
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-        break
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
