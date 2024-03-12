@@ -378,26 +378,6 @@ def train_ibot(args):
     )
 
     pred_size = args.patch_size * 8 if "swin" in args.arch else args.patch_size
-    # dataset = ImageFolderMask(
-    #     args.data_path,
-    #     transform=transform,
-    # patch_size=pred_size,
-    # pred_ratio=args.pred_ratio,
-    # pred_ratio_var=args.pred_ratio_var,
-    # pred_aspect_ratio=(0.3, 1 / 0.3),
-    # pred_shape=args.pred_shape,
-    # pred_start_epoch=args.pred_start_epoch,
-    # )
-    # sampler = DistributedSampler(dataset, shuffle=True)  # type: ignore
-    # data_loader = DataLoader(  # type: ignore
-    #     dataset,
-    #     sampler=sampler,
-    #     batch_size=args.batch_size_per_gpu,
-    #     num_workers=args.num_workers,
-    #     pin_memory=True,
-    #     drop_last=True,
-    # )
-
     make_sample = SampleMaker(
         transform=transform,
         patch_size=pred_size,
@@ -407,24 +387,9 @@ def train_ibot(args):
         pred_shape=args.pred_shape,
         pred_start_epoch=args.pred_start_epoch,
     )
-
-    # training_urls = "/work/dlclarge2/rapanti-hvs/imagenet-wds/{00000..00009}.tar"
-    bucket = "/work/dlclarge2/rapanti-hvs/imagenet-wds/train/"
-    cache_dir = "/tmp"
-
-    # trainset = ShardListDatasetMask(
-    #     bucket+"imagenet-train.json", cache_dir=cache_dir, keep=True,
-    #     transformations=transform,
-    #     patch_size=pred_size,
-    #     pred_ratio=args.pred_ratio,
-    #     pred_ratio_var=args.pred_ratio_var,
-    #     pred_aspect_ratio=(0.3, 1 / 0.3),
-    #     pred_shape=args.pred_shape,
-    #     pred_start_epoch=args.pred_start_epoch,
-    # )
     trainset = wids.ShardListDataset(
-        bucket + "imagenet-train.json",
-        cache_dir=cache_dir,
+        args.data_path + "imagenet-train.json",
+        cache_dir="/tmp",
         keep=True,
     )
     trainset.add_transform(make_sample)
@@ -442,18 +407,8 @@ def train_ibot(args):
         drop_last=True,
     )
 
-    # trainset = wds.WebDataset(
-    #     training_urls, resampled=True, cache_dir=cache_dir, shardshuffle=True
-    # )
-    # trainset = trainset.shuffle(1000).decode("pil").map(make_sample)
-    # trainset = trainset.batched(args.batch_size_per_gpu)
-
-    # trainloader = wds.WebLoader(trainset, batch_size=None, num_workers=args.num_workers, pin_memory=True)
-    # trainloader = trainloader.unbatched().shuffle(1000).batched(args.batch_size_per_gpu)
-
-    steps_per_epoch = len(trainset) // (args.batch_size_per_gpu * args.world_size)
+    steps_per_epoch = len(trainset) // (args.batch_size_per_gpu * utils.get_world_size())
     args.steps_per_epoch = steps_per_epoch
-    # data_loader = trainloader.with_epoch(steps_per_epoch)
 
     print(f"Data loaded: there are {len(trainset)} images.")
 
@@ -617,9 +572,7 @@ def train_ibot(args):
     start_time = time.time()
     print("Starting iBOT training!")
     for epoch in range(start_epoch, args.epochs):
-        # data_loader.sampler.set_epoch(epoch)
-        # data_loader.dataset.set_epoch(epoch)
-        trainsampler.set_epoch(0)
+        trainsampler.set_epoch(epoch)
         # ============ training one epoch of iBOT ... ============
         train_stats = train_one_epoch(
             student,
@@ -689,14 +642,9 @@ def train_one_epoch(
     params_q = [param_q for name_q, param_q in zip(names_q, params_q) if name_q in names_common]
     params_k = [param_k for name_k, param_k in zip(names_k, params_k) if name_k in names_common]
 
-    # for it, (images, masks, index) in enumerate(metric_logger.log_every(data_loader, 10, header)):
-    for it, (images, masks) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    for it, (images, masks, index) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    # for it, (images, masks) in enumerate(metric_logger.log_every(data_loader, 10, header)):
         it = args.steps_per_epoch * epoch + it  # global training iteration
-
-        save_image(images[0], "batch.png")
-        print(masks[0].shape, masks[0].dtype, masks[0].min(), masks[0].max())
-        save_image(masks[0].unsqueeze(1).float(), "mask.png")
-        sys.exit()
 
         # update weight decay and learning rate according to their schedule
         for i, param_group in enumerate(optimizer.param_groups):
@@ -707,14 +655,14 @@ def train_one_epoch(
         # move images to gpu
         images = [im.cuda(non_blocking=True) for im in images]
         masks = [msk.cuda(non_blocking=True) for msk in masks]
-        # index = index.cuda(non_blocking=True)
-
-        # tensor_list = [torch.zeros_like(index) for _ in range(2)]
-        # dist.all_gather(tensor_list, index)
-        # tensor_list = [t.cpu().detach().numpy() for t in tensor_list]
-        # if np.intersect1d(tensor_list[0], tensor_list[1]):
-        #     print("Error: intersection found")
-        #     sys.exit()
+        
+        index = index.cuda(non_blocking=True)
+        tensor_list = [torch.zeros_like(index) for _ in range(args.world_size)]
+        dist.all_gather(tensor_list, index)
+        tensor_list = [t.cpu().detach().numpy() for t in tensor_list]
+        if np.concatenate(tensor_list).size != np.unique(np.concatenate(tensor_list)).size:
+            print("Error: intersection found")
+            sys.exit()
 
         if args.use_hvp:
             if not it % args.hvp_step:
@@ -745,15 +693,6 @@ def train_one_epoch(
             print("Loss is {}, stopping training".format(loss.item()), force=True)  # type: ignore
             sys.exit(1)
 
-        # # log statistics
-        # probs1 = teacher_output[0].chunk(args.global_crops_number)
-        # probs2 = student_output[0].chunk(args.global_crops_number)
-        # pred1 = utils.concat_all_gather(probs1[0].max(dim=1)[1])
-        # pred2 = utils.concat_all_gather(probs2[1].max(dim=1)[1])
-        # acc = (pred1 == pred2).sum() / pred1.size(0)
-        # pred_labels.append(pred1)
-        # real_labels.append(utils.concat_all_gather(labels.to(pred1.device)))
-
         # student update
         optimizer.zero_grad()
         if fp16_scaler is None:
@@ -782,19 +721,10 @@ def train_one_epoch(
         metric_logger.update(loss=loss.item())
         for key, value in all_loss.items():
             metric_logger.update(**{key: value.item()})
-        # metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-        # metric_logger.update(wd=optimizer.param_groups[0]["weight_decay"])
-        # metric_logger.update(acc=acc)
 
-    # pred_labels = torch.cat(pred_labels).cpu().detach().numpy()
-    # real_labels = torch.cat(real_labels).cpu().detach().numpy()
-    # nmi, ari, fscore, adjacc = eval_pred(real_labels, pred_labels, calc_acc=False)
-    # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    # print("NMI: {}, ARI: {}, F: {}, ACC: {}".format(nmi, ari, fscore, adjacc))
     print("Averaged stats:", metric_logger)
     return_dict = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-    # return_dict.update({"nmi": nmi, "ari": ari, "fscore": fscore, "adjacc": adjacc})
     return return_dict
 
 
@@ -1170,7 +1100,7 @@ class SampleMaker(object):
     def __call__(self, sample, val=False):
         output = self.transform(sample[".jpg"])
         # print(sample['__index__'])
-        # index = sample['__index__']
+        index = sample['__index__']
 
         masks = []
         for img in output:
@@ -1233,7 +1163,8 @@ class SampleMaker(object):
 
             masks.append(mask)
 
-        return output, masks
+        # return output, masks
+        return output, masks, index
 
 
 if __name__ == "__main__":
