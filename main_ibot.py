@@ -23,17 +23,12 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import utils
-from evaluation.unsupervised.unsup_cls import eval_pred
-from loader import ImageFolderMask
+import wids
 from models.head import iBOTHead
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from torchvision import models as torchvision_models
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
-import webdataset as wds
-import wids
-
-from torchvision.utils import save_image
 
 
 def get_args_parser():
@@ -388,7 +383,7 @@ def train_ibot(args):
         pred_start_epoch=args.pred_start_epoch,
     )
     trainset = wids.ShardListDataset(
-        args.data_path + "imagenet-train.json",
+        args.data_path + "imagenet_train.json",
         cache_dir="/tmp",
         keep=True,
     )
@@ -643,7 +638,7 @@ def train_one_epoch(
     params_k = [param_k for name_k, param_k in zip(names_k, params_k) if name_k in names_common]
 
     for it, (images, masks, index) in enumerate(metric_logger.log_every(data_loader, 10, header)):
-    # for it, (images, masks) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+        # for it, (images, masks) in enumerate(metric_logger.log_every(data_loader, 10, header)):
         it = args.steps_per_epoch * epoch + it  # global training iteration
 
         # update weight decay and learning rate according to their schedule
@@ -655,7 +650,7 @@ def train_one_epoch(
         # move images to gpu
         images = [im.cuda(non_blocking=True) for im in images]
         masks = [msk.cuda(non_blocking=True) for msk in masks]
-        
+
         index = index.cuda(non_blocking=True)
         tensor_list = [torch.zeros_like(index) for _ in range(args.world_size)]
         dist.all_gather(tensor_list, index)
@@ -1100,7 +1095,7 @@ class SampleMaker(object):
     def __call__(self, sample, val=False):
         output = self.transform(sample[".jpg"])
         # print(sample['__index__'])
-        index = sample['__index__']
+        index = sample["__index__"]
 
         masks = []
         for img in output:
