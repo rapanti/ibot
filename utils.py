@@ -575,6 +575,13 @@ def init_distributed_mode(args):
         args.rank, args.gpu, args.world_size = 0, 0, 1
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = "29500"
+        dist.init_process_group(
+            backend="nccl" if dist.is_nccl_available() else "gloo",
+            world_size=1,
+            rank=0,
+        )
+        torch.cuda.set_device(args.gpu)
+        return
     else:
         print("Does not support training without GPU.")
         sys.exit(1)
