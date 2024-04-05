@@ -560,40 +560,51 @@ def setup_for_distributed(is_master):
 
 def init_distributed_mode(args):
     # launched with torch.distributed.launch
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        args.rank = int(os.environ["RANK"])
-        args.world_size = int(os.environ["WORLD_SIZE"])
-        args.gpu = int(os.environ["LOCAL_RANK"])
+    # if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+    #     args.rank = int(os.environ["RANK"])
+    #     args.world_size = int(os.environ["WORLD_SIZE"])
+    #     args.gpu = int(os.environ["LOCAL_RANK"])
     # launched with submitit on a slurm cluster
     # elif "SLURM_PROCID" in os.environ:
     #     args.rank = int(os.environ["SLURM_PROCID"])
     #     args.gpu = args.rank % torch.cuda.device_count()
     # launched naively with `python main_dino.py`
     # we manually add MASTER_ADDR and MASTER_PORT to env variables
-    elif torch.cuda.is_available():
-        print("Will run the code on one GPU.")
-        args.rank, args.gpu, args.world_size = 0, 0, 1
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = "29500"
-        dist.init_process_group(
-            backend="nccl" if dist.is_nccl_available() else "gloo",
-            world_size=1,
-            rank=0,
-        )
-        torch.cuda.set_device(args.gpu)
-        return
-    else:
-        print("Does not support training without GPU.")
-        sys.exit(1)
+    # elif torch.cuda.is_available():
+    #     print("Will run the code on one GPU.")
+    #    args.rank, args.gpu, args.world_size = 0, 0, 1
+    #    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    #    os.environ["MASTER_PORT"] = "29500"
+    #    dist.init_process_group(
+    #        backend="nccl" if dist.is_nccl_available() else "gloo",
+    #        world_size=1,
+    #        rank=0,
+    #    )
+    #    torch.cuda.set_device(args.gpu)
+    #    return
+    #else:
+    #    print("Does not support training without GPU.")
+    #    sys.exit(1)
+    
+    os.environ['RANK'] = str(os.environ.get('PMI_RANK', 0))
+    args.rank = int(os.environ['RANK'])
+
+    os.environ['WORLD_SIZE'] = str(os.environ.get('PMI_SIZE', 1))
+    args.world_size = int(os.environ['WORLD_SIZE'])
+
+    time.sleep(10)
+    
+    args.dist_url = f"tcp://{os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}"
 
     dist.init_process_group(
-        backend="nccl" if dist.is_nccl_available() else "gloo",
-        # init_method=args.dist_url,
-        # world_size=args.world_size,
-        # rank=args.rank,
+        backend="ccl",
+        init_method=args.dist_url,
+        world_size=args.world_size,
+        rank=args.rank,
     )
+    args.gpu = dist.get_rank() % torch.xpu.device_count()
 
-    torch.cuda.set_device(args.gpu)
+    torch.xpu.set_device(args.gpu)
     print(
         "| distributed init (rank {}): {}".format(args.rank, args.dist_url), flush=True
     )

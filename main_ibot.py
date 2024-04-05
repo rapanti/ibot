@@ -17,6 +17,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import intel_extension_for_pytorch as ipex
+import oneccl_bindings_for_pytorch as torch_ccl
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.nn as nn
@@ -455,8 +457,21 @@ def train_ibot(args):
             shared_head=args.shared_head_teacher,
         ),
     )
-    # move networks to gpu
-    student, teacher = student.cuda(), teacher.cuda()
+    # move networks to xpu
+    student, teacher = student.xpu(), teacher.xpu()
+    
+    # ============ preparing optimizer ... ============
+    params_groups = utils.get_params_groups(student)
+    if args.optimizer == "adamw":
+        optimizer = torch.optim.AdamW(params_groups)  # to use with ViTs
+    elif args.optimizer == "sgd":
+        optimizer = torch.optim.SGD(params_groups, lr=0, momentum=0.9)  # lr is set by scheduler
+    elif args.optimizer == "lars":
+        optimizer = utils.LARS(params_groups)  # to use with convnet and large batches
+
+    teacher, _ = ipex.optimize(model=teacher, dtype=torch.float32, optimizer=optimizer)
+    student, optimizer = ipex.optimize(model=student, dtype=torch.float32, optimizer=optimizer)
+
     # synchronize batch norms (if any)
     if utils.has_batchnorms(student):
         student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
@@ -503,7 +518,7 @@ def train_ibot(args):
         lambda1=args.lambda1,
         lambda2=args.lambda2,
         mim_start_epoch=args.pred_start_epoch,
-    ).cuda()
+    ).xpu()
 
     # ============ preparing optimizer ... ============
     params_groups = utils.get_params_groups(student)
@@ -515,8 +530,8 @@ def train_ibot(args):
         optimizer = utils.LARS(params_groups)  # to use with convnet and large batches
     # for mixed precision training
     fp16_scaler = None
-    if args.use_fp16:
-        fp16_scaler = torch.cuda.amp.GradScaler()  # type: ignore
+    # if args.use_fp16:
+    #     fp16_scaler = torch.cuda.amp.GradScaler()  # type: ignore
 
     # ============ init schedulers ... ============
     lr_schedule = utils.cosine_scheduler(
@@ -637,8 +652,8 @@ def train_one_epoch(
                 param_group["weight_decay"] = wd_schedule[it]
 
         # move images to gpu
-        images = [im.cuda(non_blocking=True) for im in images]
-        masks = [msk.cuda(non_blocking=True) for msk in masks]
+        images = [im.xpu(non_blocking=True) for im in images]
+        masks = [msk.xpu(non_blocking=True) for msk in masks]
 
         if args.use_hvp:
             if not it % args.hvp_step:
@@ -650,7 +665,7 @@ def train_one_epoch(
                 images = images[:a] + images[b : b + c]
                 masks = masks[:a]
 
-        with torch.cuda.amp.autocast(fp16_scaler is not None):  # type: ignore
+        with torch.xpu.amp.autocast(fp16_scaler is not None):  # type: ignore
             # get global views
             teacher_output = teacher(images[:args.global_crops_number])
             student_output = student(images[:args.global_crops_number], mask=masks[:args.global_crops_number])
@@ -702,7 +717,7 @@ def train_one_epoch(
                 param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
 
         # logging
-        torch.cuda.synchronize()
+        torch.xpu.synchronize()
         metric_logger.update(loss=loss.item())
         for key, value in all_loss.items():
             metric_logger.update(**{key: value.item()})
@@ -1003,7 +1018,7 @@ class DataAugmentationiBOT(object):
 
 @torch.no_grad()
 def hard_view_selection(images, masks, student, teacher, criterion, epoch, args):
-    with torch.cuda.amp.autocast():  # type: ignore
+    with torch.xpu.amp.autocast():  # type: ignore
         teacher_output = teacher(images[:args.global_crops_number_loader])
         student_output = student(
             images[:args.global_crops_number_loader], mask=masks[:args.global_crops_number_loader]
